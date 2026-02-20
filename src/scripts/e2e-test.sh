@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-# End-to-end test: compile real binaries with multiple Bun versions via multibun,
+# End-to-end test: compile real binaries with multiple Bun versions,
 # then extract them with our CLI and verify the results.
 #
 # This is slow (downloads Bun versions, compiles ~60MB binaries) and is meant
 # to be run separately from `bun test`.
-#
-# Requires multibun: https://github.com/nicolo-ribaudo/multibun
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DUMMY_SRC="$PROJECT_DIR/src/lib/tests/dummy/index.ts"
+
+source "$SCRIPT_DIR/get-bun.sh"
 
 # Milestone versions representing each format revision
 VERSIONS=("1.1.0" "1.1.26" "1.2.4" "1.3.9")
@@ -19,12 +19,12 @@ VERSIONS=("1.1.0" "1.1.26" "1.2.4" "1.3.9")
 for version in "${VERSIONS[@]}"; do
   echo "=== Testing Bun v${version} ==="
 
+  BUN_BIN=$(get_bun_path "$version")
   outfile="/tmp/dummy-e2e-${version}"
   outdir="/tmp/decompiled-e2e-${version}"
 
   # 1. Compile the dummy binary using that Bun version
-  multibun run --version "$version" -- \
-    bun build --compile --sourcemap=inline \
+  "$BUN_BIN" build --compile --sourcemap=inline \
     "$DUMMY_SRC" --outfile "$outfile"
 
   # 2. Extract using our CLI (always runs with current Bun)

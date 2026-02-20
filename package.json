@@ -15,8 +15,7 @@
   },
   "scripts": {
     "start": "bun src/cli.ts",
-    "tests": "multibun run --from 0.6.0 -x ./src/scripts/dummyTests.sh -n --html static/tests.html",
-    "test:local": "bun test",
+    "test": "bun test",
     "test:e2e": "bash src/scripts/e2e-test.sh",
     "build-fixtures": "bash src/scripts/build-fixtures.sh",
     "debug-binary": "bun src/scripts/debug-binary.ts",
