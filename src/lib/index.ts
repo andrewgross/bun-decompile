@@ -5,6 +5,9 @@ import {
   BUNFS_ROOT,
   BUNFS_ROOT_OLD,
 } from "./constants";
+import { locateDataSection } from "./formats";
+import { findBunSection } from "./macho";
+import { parseOffsets } from "./offsets";
 
 export interface BundledFile {
   path: string;
@@ -71,48 +74,88 @@ export function extractBundledFiles(
   // Note: reverse engineering
   // bun/src/StandaloneModuleGraph.zig/StandaloneModuleGraph/toBytes
 
-  // Check that the executable has the right trailer
-  const trailer = decoder.decode(
-    compiledBinaryData.buffer.slice(
-      compiledBinaryData.byteLength - 8 - BUN_TRAILER.length,
-      compiledBinaryData.byteLength - 8,
-    ),
-  );
-  if (trailer !== BUN_TRAILER) {
+  // 1. Locate the data section (Mach-O __BUN/__bun or appended to file end)
+  const section = locateDataSection(compiledBinaryData);
+  if (!section) {
     throw new InvalidTrailerError();
   }
 
-  const totalByteCount = compiledBinaryData.getUint32(compiledBinaryData.byteLength - 8, true);
-  if (compiledBinaryData.byteLength !== totalByteCount) {
-    throw new TotalByteCountMismatchError();
+  // 2. Compute trailer offset and validate container-specific invariants
+  let dataView: DataView;
+  let trailerOffset: number;
+  let modulesStart: number;
+
+  if (section.container === "macho") {
+    // Mach-O: section.data = [modules][metadata][Offsets][trailer 16B]
+    dataView = section.data;
+    trailerOffset = dataView.byteLength - BUN_TRAILER.length;
+    modulesStart = 0;
+  } else {
+    // Appended: full binary = [...native code...][modules][metadata][Offsets 24B][trailer 16B][totalByteCount 8B]
+    dataView = section.data;
+    trailerOffset = dataView.byteLength - 8 - BUN_TRAILER.length;
+
+    const totalByteCount = dataView.getUint32(dataView.byteLength - 8, true);
+    if (dataView.byteLength !== totalByteCount) {
+      throw new TotalByteCountMismatchError();
+    }
+
+    // modulesStart computed after parsing offsets below
+    modulesStart = 0; // placeholder
   }
 
-  const entrypointId = compiledBinaryData.getUint32(compiledBinaryData.byteLength - 44, true);
+  // 3. Parse the Offsets struct (variable size: 24 or 32 bytes)
+  const offsets = parseOffsets(dataView, trailerOffset);
 
-  const modulesPtrOffset = compiledBinaryData.getUint32(compiledBinaryData.byteLength - 40, true);
-  const modulesPtrLength = compiledBinaryData.getUint32(compiledBinaryData.byteLength - 36, true);
+  // For appended format, compute modulesStart from offsetByteCount
+  if (section.container === "append") {
+    // offsetByteCount + structSize + trailer + totalByteCount = distance from modulesStart to EOF
+    modulesStart =
+      dataView.byteLength - (offsets.offsetByteCount + offsets.structSize + BUN_TRAILER.length + 8);
+  }
 
-  const modulesStart = getModulesStart(compiledBinaryData);
-  const modulesEnd = modulesStart + modulesPtrOffset;
-  const modulesData = compiledBinaryData.buffer.slice(modulesStart, modulesEnd);
+  // 4. Extract module data
+  const modulesEnd = modulesStart + offsets.modulesPtrOffset;
+  const modulesData = dataView.buffer.slice(
+    dataView.byteOffset + modulesStart,
+    dataView.byteOffset + modulesEnd,
+  );
 
   const modulesMetadataStart = modulesEnd;
 
-  const payloadSize =
-    compiledBinaryData.getUint32(compiledBinaryData.byteLength - 68, true) +
-    compiledBinaryData.getUint32(compiledBinaryData.byteLength - 64, true);
-  const newFormat = payloadSize + 1 === modulesPtrOffset;
-  const modulesMetadataChunkSize = newFormat ? 28 : 32;
+  // 5. Determine metadata chunk size and format
+  // V4 (structSize 32): 52-byte metadata chunks, new format
+  // V2/V3 (structSize 24, new format): 28-byte metadata chunks
+  // V1 (structSize 24, old format): 32-byte metadata chunks
+  let newFormat: boolean;
+  let modulesMetadataChunkSize: number;
+  if (offsets.structSize === 32) {
+    // V4 format: metadata chunks grew to 52 bytes
+    newFormat = true;
+    modulesMetadataChunkSize = 52;
+  } else if (section.container === "macho") {
+    // V3: Mach-O with 24-byte offsets, always new format
+    newFormat = true;
+    modulesMetadataChunkSize = 28;
+  } else {
+    // V1/V2 appended format: use the existing heuristic
+    const structStart = trailerOffset - offsets.structSize;
+    const payloadSize =
+      dataView.getUint32(structStart - 20, true) + dataView.getUint32(structStart - 16, true);
+    newFormat = payloadSize + 1 === offsets.modulesPtrOffset;
+    modulesMetadataChunkSize = newFormat ? 28 : 32;
+  }
 
+  // 6. Parse each module
   const bundledFiles: BundledFile[] = [];
   let currentOffset = 0;
-  for (let i = 0; i < modulesPtrLength / modulesMetadataChunkSize; i++) {
-    const isEntrypoint = i === entrypointId;
+  for (let i = 0; i < offsets.modulesPtrLength / modulesMetadataChunkSize; i++) {
+    const isEntrypoint = i === offsets.entryPointId;
 
     const modulesMetadataOffset = modulesMetadataStart + i * modulesMetadataChunkSize;
-    const pathLength = compiledBinaryData.getUint32(modulesMetadataOffset + 4, true);
-    const contentsLength = compiledBinaryData.getUint32(modulesMetadataOffset + 12, true);
-    const sourcemapLength = compiledBinaryData.getUint32(modulesMetadataOffset + 20, true);
+    const pathLength = dataView.getUint32(modulesMetadataOffset + 4, true);
+    const contentsLength = dataView.getUint32(modulesMetadataOffset + 12, true);
+    const sourcemapLength = dataView.getUint32(modulesMetadataOffset + 20, true);
 
     let path = decoder.decode(modulesData.slice(currentOffset, currentOffset + pathLength));
     if (options.normaliseEntrypointFileName && isEntrypoint) {
@@ -130,13 +173,13 @@ export function extractBundledFiles(
 
     let sourcemap: BundledFile["sourcemap"];
     if (sourcemapLength) {
-      const sourcemapMappingsLength = compiledBinaryData.getUint32(
+      const sourcemapMappingsLength = dataView.getUint32(
         modulesStart + contentsEnd + 5,
         true,
       );
 
       if (sourcemapMappingsLength) {
-        const sourcemapSourcesCount = compiledBinaryData.getUint32(
+        const sourcemapSourcesCount = dataView.getUint32(
           modulesStart + contentsEnd + 1,
           true,
         );
@@ -159,7 +202,7 @@ export function extractBundledFiles(
 
         let sourceStart = mappingsEnd;
         for (let j = 0; j < sourcemapSourcesCount; j++) {
-          const sourcemapSourceLength = compiledBinaryData.getUint32(
+          const sourcemapSourceLength = dataView.getUint32(
             modulesStart + contentsEnd + 13 + j * 8,
             true,
           );
@@ -186,16 +229,6 @@ export function extractBundledFiles(
   return bundledFiles;
 }
 
-function getModulesStart(compiledBinaryData: DataView) {
-  if (compiledBinaryData.byteLength <= 48) {
-    return 0;
-  }
-
-  const offsetByteCount = compiledBinaryData.getUint32(compiledBinaryData.byteLength - 48, true);
-
-  return compiledBinaryData.byteLength - (offsetByteCount + 48);
-}
-
 function removeBunfsRootFromPath(path: string) {
   if (path.startsWith(BUNFS_ROOT)) {
     return path.slice(BUNFS_ROOT.length);
@@ -216,9 +249,9 @@ export interface BunVersion {
   newFormat?: boolean;
 }
 
-function getExecutableVersionNew(data: Uint8Array, modulesStart: number): BunVersion {
+function getExecutableVersionNew(data: Uint8Array, searchLimit: number): BunVersion {
   const versionIndex = data.findIndex((_, index) => {
-    if (index >= modulesStart) {
+    if (index >= searchLimit) {
       return false;
     }
 
@@ -258,9 +291,9 @@ function getExecutableVersionNew(data: Uint8Array, modulesStart: number): BunVer
   };
 }
 
-function getExecutableVersionOld(data: Uint8Array, modulesStart: number): BunVersion {
+function getExecutableVersionOld(data: Uint8Array, searchLimit: number): BunVersion {
   const versionIndex = data.findIndex((_, index) => {
-    if (index >= modulesStart) {
+    if (index >= searchLimit) {
       return false;
     }
 
@@ -305,15 +338,41 @@ export function getExecutableVersion(data: Uint8Array | ArrayBuffer): BunVersion
     data = new Uint8Array(data);
   }
 
-  const modulesStart = getModulesStart(new DataView(data.buffer));
+  const binary = new DataView(data.buffer, data.byteOffset, data.byteLength);
+
+  // Determine search limit to exclude embedded module data
+  // (prevents matching fake version strings inside bundled files)
+  let searchLimit: number;
+  const machoSection = findBunSection(binary);
+  if (machoSection) {
+    // Don't search inside the __BUN section
+    searchLimit = machoSection.offset;
+  } else {
+    // Legacy appended format: don't search past modules start
+    searchLimit = getModulesStartLegacy(binary);
+  }
 
   try {
-    return { ...getExecutableVersionNew(data, modulesStart), newFormat: true };
+    return { ...getExecutableVersionNew(data, searchLimit), newFormat: true };
   } catch (e) {
     if (e instanceof VersionNotFoundError) {
-      return { ...getExecutableVersionOld(data, modulesStart), newFormat: false };
+      return { ...getExecutableVersionOld(data, searchLimit), newFormat: false };
     }
 
     throw e;
   }
+}
+
+/**
+ * Legacy modulesStart calculation for appended format binaries.
+ * Used only by getExecutableVersion to determine search bounds.
+ */
+function getModulesStartLegacy(compiledBinaryData: DataView) {
+  if (compiledBinaryData.byteLength <= 48) {
+    return compiledBinaryData.byteLength;
+  }
+
+  const offsetByteCount = compiledBinaryData.getUint32(compiledBinaryData.byteLength - 48, true);
+
+  return compiledBinaryData.byteLength - (offsetByteCount + 48);
 }

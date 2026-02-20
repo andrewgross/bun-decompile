@@ -1,5 +1,8 @@
 import type { BunFile } from "bun";
 
+import { readdirSync } from "node:fs";
+import { basename, join } from "node:path";
+
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 
 import {
@@ -65,12 +68,16 @@ describe("extractBundledFiles", () => {
   });
 
   test("with a corrupt executable", () => {
-    const view = new DataView(dummyData);
+    // Corrupt the binary so neither Mach-O nor appended format can find valid data
+    const corrupted = dummyData.slice(0);
+    const view = new DataView(corrupted);
 
-    // Corrupt the total byte count (last 8 bytes)
-    view.setUint32(dummyData.byteLength - 8, 0xdeadbeef, true);
+    // Corrupt the Mach-O magic (first 4 bytes) to prevent Mach-O section detection
+    view.setUint32(0, 0xdeadbeef, true);
 
-    expect(() => extractBundledFiles(dummyData)).toThrowError(TotalByteCountMismatchError);
+    // The appended format check will also fail since the file end doesn't have a valid trailer
+
+    expect(() => extractBundledFiles(corrupted)).toThrowError(InvalidTrailerError);
   });
 });
 
@@ -100,4 +107,30 @@ describe("getExecutableVersion", () => {
   test("with a non-executable", () => {
     expect(() => getExecutableVersion(notAnExecutable)).toThrowError(InvalidExecutableError);
   });
+});
+
+describe("multi-version fixtures", () => {
+  const fixturesDir = join(import.meta.dir, "fixtures");
+  let fixtures: string[] = [];
+
+  try {
+    fixtures = readdirSync(fixturesDir)
+      .filter((f) => f.startsWith("v") && f.endsWith(".bin"))
+      .map((f) => join(fixturesDir, f));
+  } catch {
+    // fixtures directory may not exist yet
+  }
+
+  if (fixtures.length === 0) {
+    test.skip("no fixtures found (run `bun run build-fixtures` first)", () => {});
+  } else {
+    for (const fixturePath of fixtures) {
+      test(`parses ${basename(fixturePath)}`, async () => {
+        const data = await Bun.file(fixturePath).arrayBuffer();
+        const files = extractBundledFiles(data);
+        expect(files.length).toBeGreaterThan(0);
+        expect(files[0].path).toBe("index.js");
+      });
+    }
+  }
 });
