@@ -107,6 +107,20 @@ describe("getExecutableVersion", () => {
   test("with a non-executable", () => {
     expect(() => getExecutableVersion(notAnExecutable)).toThrowError(InvalidExecutableError);
   });
+
+  test("with Bun 1.4.0+ banner-only format", () => {
+    // Bun 1.4.0+ compiled binaries no longer embed a literal version after the
+    // ANSI "bun build v" marker (it's a runtime-substituted placeholder); only
+    // the "Bun v<version> (<sha>)" banner remains. Synthesize that layout: a
+    // 512-byte buffer whose trailing offsetByteCount is 0 (so the legacy search
+    // limit stays wide) with the banner near the start.
+    const buf = new Uint8Array(512);
+    buf.set(new TextEncoder().encode("Bun v1.4.0 (63bb0ca0d)"), 64);
+
+    const version = getExecutableVersion(buf.buffer);
+    expect(version.version).toBe("1.4.0");
+    expect(version.revision).toBe("63bb0ca0d");
+  });
 });
 
 describe("multi-version fixtures", () => {

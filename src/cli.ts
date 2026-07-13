@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -86,8 +85,16 @@ async function main() {
 
   const data = await file.arrayBuffer();
 
-  const version = getExecutableVersion(data);
-  console.log(`Bun v${version.version} (${version.revision})`);
+  // Version detection is informational only — extraction relies on the binary's
+  // struct layout, not the version string. Never let a failed/changed version
+  // banner (e.g. a future Bun format) block extraction.
+  try {
+    const version = getExecutableVersion(data);
+    const revision = version.revision ? ` (${version.revision})` : "";
+    console.log(`Bun v${version.version}${revision}`);
+  } catch {
+    console.warn("Warning: could not determine the Bun version; continuing with extraction.");
+  }
 
   const files = extractBundledFiles(data, {
     normaliseEntrypointFileName: !noNormalize,

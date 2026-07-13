@@ -1,6 +1,7 @@
 import {
   BUN_TRAILER,
   BUN_VERSION_MATCH,
+  BUN_VERSION_MATCH_BANNER,
   BUN_VERSION_MATCH_OLD,
   BUNFS_ROOT,
   BUNFS_ROOT_OLD,
@@ -189,16 +190,10 @@ export function extractBundledFiles(
 
     let sourcemap: BundledFile["sourcemap"];
     if (sourcemapLength) {
-      const sourcemapMappingsLength = dataView.getUint32(
-        modulesStart + contentsEnd + 5,
-        true,
-      );
+      const sourcemapMappingsLength = dataView.getUint32(modulesStart + contentsEnd + 5, true);
 
       if (sourcemapMappingsLength) {
-        const sourcemapSourcesCount = dataView.getUint32(
-          modulesStart + contentsEnd + 1,
-          true,
-        );
+        const sourcemapSourcesCount = dataView.getUint32(modulesStart + contentsEnd + 1, true);
 
         const mappingsStart = contentsEnd + 9 + sourcemapSourcesCount * 16;
         const mappingsEnd = mappingsStart + sourcemapMappingsLength;
@@ -349,12 +344,68 @@ function getExecutableVersionOld(data: Uint8Array, searchLimit: number): BunVers
   };
 }
 
-export function getExecutableVersion(data: Uint8Array | ArrayBuffer): BunVersion {
-  if (data instanceof ArrayBuffer) {
-    data = new Uint8Array(data);
+/**
+ * Newest version-string format (Bun 1.4.0+).
+ *
+ * Bun 1.4.0 stopped embedding a literal version after the ANSI
+ * BUN_VERSION_MATCH marker — that became a runtime-substituted placeholder
+ * (e.g. `...\x1b[2mv\xc0\x04...`) — but the plain "Bun v<version> (<revision>)"
+ * banner is still present in the runtime's read-only data. Scan for it and pull
+ * out the semantic version (and revision, if present).
+ */
+function getExecutableVersionBanner(data: Uint8Array, searchLimit: number): BunVersion {
+  const decoder = new TextDecoder();
+  const needle = BUN_VERSION_MATCH_BANNER;
+
+  // A "Bun v" occurrence may be help text rather than the version banner, so
+  // keep scanning until one actually parses as a version.
+  let from = 0;
+  for (;;) {
+    const index = indexOfBytes(data, needle, from, searchLimit);
+    if (index === -1) break;
+
+    const start = index + needle.length;
+    const window = decoder.decode(data.subarray(start, Math.min(start + 96, data.length)));
+
+    // Accepts "1.4.0", "1.4.0+63bb0ca0d", "1.1.22-canary.96", each optionally
+    // followed by " (revision)". Revision is the "+<sha>" build metadata when
+    // present, else the parenthetical (a git sha or a platform string).
+    const match = window.match(
+      /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)(?:\+([0-9A-Za-z]+))?(?:\s*\(([^)]+)\))?/,
+    );
+    if (match) {
+      return { version: match[1], revision: match[2] ?? match[3] ?? "" };
+    }
+
+    from = start;
   }
 
-  const binary = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  throw new VersionNotFoundError();
+}
+
+/**
+ * Find the first occurrence of an ASCII needle in `data` within [from, limit).
+ * Returns the byte offset, or -1 if not found.
+ */
+function indexOfBytes(data: Uint8Array, needle: string, from: number, limit: number): number {
+  const max = Math.min(limit, data.length - needle.length + 1);
+  for (let i = from; i < max; i++) {
+    let matched = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (data[i + j] !== needle.charCodeAt(j)) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return i;
+  }
+  return -1;
+}
+
+export function getExecutableVersion(data: Uint8Array | ArrayBuffer): BunVersion {
+  const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+
+  const binary = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
   // Determine search limit to exclude embedded module data
   // (prevents matching fake version strings inside bundled files)
@@ -368,15 +419,25 @@ export function getExecutableVersion(data: Uint8Array | ArrayBuffer): BunVersion
     searchLimit = getModulesStartLegacy(binary);
   }
 
-  try {
-    return { ...getExecutableVersionNew(data, searchLimit), newFormat: true };
-  } catch (e) {
-    if (e instanceof VersionNotFoundError) {
-      return { ...getExecutableVersionOld(data, searchLimit), newFormat: false };
-    }
+  // Try each known version-string format in order, newest binaries last. Bun
+  // 1.4.0+ fails the first two matchers (the literal after BUN_VERSION_MATCH is
+  // gone) and falls back to the "Bun v" banner.
+  const matchers: Array<() => BunVersion> = [
+    () => ({ ...getExecutableVersionNew(bytes, searchLimit), newFormat: true }),
+    () => ({ ...getExecutableVersionOld(bytes, searchLimit), newFormat: false }),
+    () => ({ ...getExecutableVersionBanner(bytes, searchLimit), newFormat: true }),
+  ];
 
-    throw e;
+  for (const matcher of matchers) {
+    try {
+      return matcher();
+    } catch (e) {
+      if (e instanceof VersionNotFoundError) continue;
+      throw e;
+    }
   }
+
+  throw new VersionNotFoundError();
 }
 
 /**
