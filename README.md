@@ -2,7 +2,9 @@
 
 Extracts the original transpiled sources from an executable file generated via `bun build --compile`.
 
-Supports all Bun binary formats from v0.6.0 through v1.3.x+.
+Supports every Bun binary format from v0.6.0 through v1.4.x, on macOS (Mach-O
+`__BUN` section), Linux (ELF `.bun` section), and Windows (PE `.bun` section),
+as well as the legacy appended-to-EOF layout.
 
 ## Installation
 
@@ -24,12 +26,12 @@ bun-decompile <input-binary> [options]
 
 ### Options
 
-| Flag | Description |
-|---|---|
-| `-o, --output <dir>` | Output directory (default: `./decompiled`) |
-| `--no-normalize` | Don't normalize entrypoint filename to `index.js` |
-| `-v, --version` | Print version and exit |
-| `-h, --help` | Print help and exit |
+| Flag                 | Description                                       |
+| -------------------- | ------------------------------------------------- |
+| `-o, --output <dir>` | Output directory (default: `./decompiled`)        |
+| `--no-normalize`     | Don't normalize entrypoint filename to `index.js` |
+| `-v, --version`      | Print version and exit                            |
+| `-h, --help`         | Print help and exit                               |
 
 ### Examples
 

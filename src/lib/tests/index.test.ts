@@ -12,6 +12,9 @@ import {
   InvalidTrailerError,
   TotalByteCountMismatchError,
 } from "..";
+import { detectExecutableFormat } from "../formats";
+import { findMachoBunSection } from "../macho";
+import { removeBunfsRootFromPath } from "../modules";
 
 let dummy: BunFile;
 let dummyData: ArrayBuffer;
@@ -120,6 +123,106 @@ describe("getExecutableVersion", () => {
     const version = getExecutableVersion(buf.buffer);
     expect(version.version).toBe("1.4.0");
     expect(version.revision).toBe("63bb0ca0d");
+  });
+});
+
+// Wrap a raw Bun payload (the bytes of a __BUN/.bun section) in a minimal
+// synthetic ELF64 / PE, so the ELF and PE section finders can be exercised
+// without committing hundred-MB cross-compiled binaries.
+function wrapInElf(payload: Uint8Array): ArrayBuffer {
+  const SHDR = 64;
+  const NSEC = 3; // null, .shstrtab, .bun
+  const bunOffset = 64;
+  const strtabOffset = bunOffset + payload.length;
+  const strtab = new TextEncoder().encode("\0.shstrtab\0.bun\0"); // ".shstrtab"@1, ".bun"@11
+  const shoff = strtabOffset + strtab.length;
+  const buf = new Uint8Array(shoff + NSEC * SHDR);
+  const dv = new DataView(buf.buffer);
+
+  buf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0); // magic, EI_CLASS=64, EI_DATA=LE, version
+  dv.setBigUint64(40, BigInt(shoff), true); // e_shoff
+  dv.setUint16(58, SHDR, true); // e_shentsize
+  dv.setUint16(60, NSEC, true); // e_shnum
+  dv.setUint16(62, 1, true); // e_shstrndx -> .shstrtab
+
+  buf.set(payload, bunOffset);
+  buf.set(strtab, strtabOffset);
+
+  const shstrtab = shoff + 1 * SHDR;
+  dv.setUint32(shstrtab, 1, true); // sh_name -> ".shstrtab"
+  dv.setBigUint64(shstrtab + 24, BigInt(strtabOffset), true);
+  dv.setBigUint64(shstrtab + 32, BigInt(strtab.length), true);
+
+  const bun = shoff + 2 * SHDR;
+  dv.setUint32(bun, 11, true); // sh_name -> ".bun"
+  dv.setBigUint64(bun + 24, BigInt(bunOffset), true);
+  dv.setBigUint64(bun + 32, BigInt(payload.length), true);
+
+  return buf.buffer;
+}
+
+function wrapInPe(payload: Uint8Array): ArrayBuffer {
+  const peOffset = 64;
+  const sectionTable = peOffset + 24; // 4 (signature) + 20 (COFF), no optional header
+  const payloadOffset = sectionTable + 40; // one section header
+  const buf = new Uint8Array(payloadOffset + payload.length);
+  const dv = new DataView(buf.buffer);
+
+  buf.set([0x4d, 0x5a], 0); // "MZ"
+  dv.setUint32(0x3c, peOffset, true); // e_lfanew
+  dv.setUint32(peOffset, 0x00004550, true); // "PE\0\0"
+  dv.setUint16(peOffset + 6, 1, true); // NumberOfSections
+  dv.setUint16(peOffset + 20, 0, true); // SizeOfOptionalHeader
+
+  buf.set(new TextEncoder().encode(".bun"), sectionTable); // section name (8 bytes)
+  dv.setUint32(sectionTable + 8, payload.length, true); // VirtualSize
+  dv.setUint32(sectionTable + 16, payload.length, true); // SizeOfRawData
+  dv.setUint32(sectionTable + 20, payloadOffset, true); // PointerToRawData
+
+  buf.set(payload, payloadOffset);
+  return buf.buffer;
+}
+
+describe("container formats", () => {
+  test("detectExecutableFormat identifies magic bytes", () => {
+    const detect = (bytes: number[]) => {
+      const b = new Uint8Array(64);
+      b.set(bytes, 0);
+      return detectExecutableFormat(new DataView(b.buffer));
+    };
+    expect(detect([0xcf, 0xfa, 0xed, 0xfe])).toBe("macho"); // 0xFEEDFACF little-endian
+    expect(detect([0x7f, 0x45, 0x4c, 0x46])).toBe("elf");
+    expect(detect([0x4d, 0x5a])).toBe("pe");
+    expect(detect([0xde, 0xad, 0xbe, 0xef])).toBe("unknown");
+  });
+
+  test("extracts through a synthetic ELF .bun section", () => {
+    const section = findMachoBunSection(new DataView(dummyData))!;
+    const payload = new Uint8Array(dummyData.slice(section.offset, section.offset + section.size));
+    const files = extractBundledFiles(wrapInElf(payload));
+    expect(files[0].path).toBe("index.js");
+    expect(files).toHaveLength(4);
+  });
+
+  test("extracts through a synthetic PE .bun section", () => {
+    const section = findMachoBunSection(new DataView(dummyData))!;
+    const payload = new Uint8Array(dummyData.slice(section.offset, section.offset + section.size));
+    const files = extractBundledFiles(wrapInPe(payload));
+    expect(files[0].path).toBe("index.js");
+    expect(files).toHaveLength(4);
+  });
+});
+
+describe("removeBunfsRootFromPath", () => {
+  test("strips unix, legacy, and Windows roots", () => {
+    expect(removeBunfsRootFromPath("/$bunfs/root/index.js")).toBe("/index.js");
+    expect(removeBunfsRootFromPath("compiled://root/a.js")).toBe("/a.js");
+    expect(removeBunfsRootFromPath("B:/~BUN/root/index.js")).toBe("/index.js");
+    expect(removeBunfsRootFromPath("Z:\\~BUN\\root\\x.js")).toBe("\\x.js");
+  });
+
+  test("throws on an unrecognised root", () => {
+    expect(() => removeBunfsRootFromPath("/nope/index.js")).toThrow();
   });
 });
 

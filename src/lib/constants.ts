@@ -1,5 +1,8 @@
 export const BUNFS_ROOT = "/$bunfs/root";
 export const BUNFS_ROOT_OLD = "compiled://root";
+// Windows mounts the virtual FS on a drive, e.g. "B:/~BUN/root" (the drive
+// letter may vary), with forward or back slashes.
+export const BUNFS_ROOT_WINDOWS = /^[A-Za-z]:[/\\]~BUN[/\\]root/;
 
 export const BUN_TRAILER = "\n---- Bun! ----\n";
 
@@ -11,4 +14,5 @@ export const BUN_VERSION_MATCH_BANNER = "Bun v";
 
 export const MACHO_MAGIC_64_LE = 0xfeedfacf;
 export const LC_SEGMENT_64 = 0x19;
-export const BUN_SECTION_DATA_HEADER_SIZE = 8;
+// ELF magic "\x7fELF" read as a little-endian u32.
+export const ELF_MAGIC_LE = 0x464c457f;
