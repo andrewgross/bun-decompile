@@ -40,24 +40,91 @@ export interface ModuleGraph {
   moduleCount: number;
 }
 
+const FORMAT_V3: ModuleFormat = { chunkSize: 36, newFormat: true, hasAbsoluteOffsets: true };
+const FORMAT_V4: ModuleFormat = { chunkSize: 52, newFormat: true, hasAbsoluteOffsets: true };
+
 /**
- * Determine the on-disk module format from the container and Offsets struct.
- *   - structSize 32          → V4 (Bun 1.3.0+): 52-byte chunks, absolute offsets
+ * Does the metadata region parse cleanly as V3's 36-byte, absolute-offset chunks?
+ *
+ * V3/V4 chunks start with an absolute {offset, length} pointer to the module's
+ * path, so every chunk can be checked independently. A wrong chunk size
+ * misaligns chunk 1 onwards, and the bytes it points at do not decode to a
+ * bunfs path — which is what makes this a reliable discriminator where
+ * divisibility alone is not (252 bytes divides by both 28 and 36).
+ */
+function looksLikeV3(
+  offsets: ParsedOffsets,
+  view: DataView,
+  modulesStart: number,
+  metadataStart: number,
+): boolean {
+  const { chunkSize } = FORMAT_V3;
+  const metadataLength = offsets.modulesPtrLength;
+
+  if (metadataLength === 0 || metadataLength % chunkSize !== 0) {
+    return false;
+  }
+
+  // The modules region runs from modulesStart up to the metadata region.
+  const modulesLength = offsets.modulesPtrOffset;
+  const decoder = new TextDecoder();
+
+  for (let i = 0; i < metadataLength / chunkSize; i++) {
+    const chunk = metadataStart + i * chunkSize;
+    if (chunk + chunkSize > view.byteLength) {
+      return false;
+    }
+
+    const pathStart = view.getUint32(chunk, true);
+    const pathLength = view.getUint32(chunk + 4, true);
+    if (pathLength === 0 || pathStart + pathLength > modulesLength) {
+      return false;
+    }
+
+    const path = decoder.decode(
+      new Uint8Array(view.buffer, view.byteOffset + modulesStart + pathStart, pathLength),
+    );
+
+    try {
+      removeBunfsRootFromPath(path);
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Determine the on-disk module format from the Offsets struct and metadata.
+ *   - structSize 32           → V4 (Bun 1.3.0+): 52-byte chunks, absolute offsets
  *   - section + structSize 24 → V3 (Bun 1.2.4+): 36-byte chunks, absolute offsets
- *   - appended + structSize 24 → V1/V2: 28 or 32-byte chunks (heuristic), sequential
+ *   - appended + structSize 24 → V3, else V1/V2: 32/28-byte chunks, sequential
+ *
+ * The container does not imply the metadata format. Linux and Windows kept
+ * appending the payload until Bun ~1.3.10, so a 1.2.4–1.2.x binary built for
+ * those targets is appended yet carries V3 metadata — probe for V3 before
+ * falling back to the V1/V2 heuristic.
  */
 export function resolveModuleFormat(
   container: ContainerKind,
   offsets: ParsedOffsets,
   view: DataView,
   trailerOffset: number,
+  modulesStart: number,
+  metadataStart: number,
 ): ModuleFormat {
   if (offsets.structSize === 32) {
-    return { chunkSize: 52, newFormat: true, hasAbsoluteOffsets: true };
+    return FORMAT_V4;
   }
 
+  // A __BUN/.bun section is only ever emitted by Bun >= 1.2.4, i.e. V3.
   if (container !== "append") {
-    return { chunkSize: 36, newFormat: true, hasAbsoluteOffsets: true };
+    return FORMAT_V3;
+  }
+
+  if (looksLikeV3(offsets, view, modulesStart, metadataStart)) {
+    return FORMAT_V3;
   }
 
   // V1/V2 appended: distinguish the 28-byte (new) and 32-byte (old) chunk layouts
@@ -77,18 +144,27 @@ export function buildModuleGraph(section: BunSection, offsets: ParsedOffsets): M
   const { view, container } = section;
   const trailerOffset = view.byteLength - BUN_TRAILER.length;
 
-  const format = resolveModuleFormat(container, offsets, view, trailerOffset);
-
   const modulesStart =
     view.byteLength - (offsets.offsetByteCount + offsets.structSize + BUN_TRAILER.length);
-  const metadataStart = modulesStart + offsets.modulesPtrOffset;
 
-  // Invariants — fail loudly rather than extracting garbage.
+  // Invariants — fail loudly rather than extracting garbage. This one first:
+  // resolving the format reads the metadata region, so the regions must be sane.
   if (modulesStart < 0) {
     throw new InvalidExecutableError(
       `Declared payload size (${offsets.offsetByteCount}) exceeds the section (${view.byteLength})`,
     );
   }
+
+  const metadataStart = modulesStart + offsets.modulesPtrOffset;
+  const format = resolveModuleFormat(
+    container,
+    offsets,
+    view,
+    trailerOffset,
+    modulesStart,
+    metadataStart,
+  );
+
   if (offsets.modulesPtrLength % format.chunkSize !== 0) {
     throw new InvalidExecutableError(
       `Metadata length ${offsets.modulesPtrLength} is not a multiple of chunk size ${format.chunkSize}`,

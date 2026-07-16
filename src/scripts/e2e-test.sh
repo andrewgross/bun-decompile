@@ -59,30 +59,42 @@ for version in "${VERSIONS[@]}"; do
   echo ""
 done
 
-# Cross-platform: recent Bun (≥ ~1.3.10) embeds the payload in ELF/PE `.bun`
-# sections rather than appending it, so exercise Linux and Windows extraction.
-echo "=== Cross-platform sections (Bun v1.3.14): ELF + PE ==="
-XBUN=$(get_bun_path "1.3.14")
-for target in "bun-linux-x64:linux" "bun-windows-x64:win.exe"; do
-  tgt="${target%%:*}"
-  label="${target##*:}"
-  outfile="/tmp/dummy-xplat-${label}"
-  outdir="/tmp/decompiled-xplat-${label}"
+# Cross-target matrix. The container a binary uses depends on BOTH the Bun
+# version and the target, and the two vary independently:
+#
+#   1.2.4  darwin → macho section   linux/windows → appended (still V3 metadata)
+#   1.3.9  darwin → macho section   linux → appended        windows → PE section
+#   1.3.14 darwin → macho section   linux → ELF section     windows → PE section
+#
+# so a version-only or target-only sweep misses combinations. Bun 1.1.0 predates
+# `--compile --target` and is covered by the native loop above.
+echo "=== Cross-target matrix ==="
+for version in "1.1.26" "1.2.4" "1.3.9" "1.3.14"; do
+  XBUN=$(get_bun_path "$version")
 
-  "$XBUN" build --compile --target="$tgt" "$DUMMY_SRC" --outfile "$outfile" 2>&1 | tail -1 || true
-  if [ ! -f "$outfile" ]; then
-    echo "  FAIL: cross-compile $tgt failed"
-    exit 1
-  fi
+  for tgt in "bun-darwin-arm64" "bun-linux-x64" "bun-windows-x64"; do
+    label="${tgt#bun-}"
+    outfile="/tmp/dummy-xplat-${version}-${label}"
+    outdir="/tmp/decompiled-xplat-${version}-${label}"
 
-  bun "$PROJECT_DIR/src/cli.ts" "$outfile" -o "$outdir"
-  if [ ! -f "$outdir/index.js" ]; then
-    echo "  FAIL: index.js not found for $tgt"
-    exit 1
-  fi
-  echo "  $tgt: extracted $(ls "$outdir" | wc -l | tr -d ' ') files"
+    "$XBUN" build --compile --target="$tgt" "$DUMMY_SRC" --outfile "$outfile" >/dev/null 2>&1 || true
+    # Windows targets get an .exe suffix.
+    [ -f "${outfile}.exe" ] && outfile="${outfile}.exe"
 
-  rm -rf "$outfile" "$outdir"
+    if [ ! -s "$outfile" ]; then
+      echo "  FAIL: cross-compile $tgt failed for v${version}"
+      exit 1
+    fi
+
+    bun "$PROJECT_DIR/src/cli.ts" "$outfile" -o "$outdir" >/dev/null
+    if [ ! -f "$outdir/index.js" ]; then
+      echo "  FAIL: index.js not found for v${version} $tgt"
+      exit 1
+    fi
+    echo "  v${version} ${label}: extracted $(ls "$outdir" | wc -l | tr -d ' ') files"
+
+    rm -rf "$outfile" "$outdir"
+  done
 done
 
 echo ""

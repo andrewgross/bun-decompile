@@ -4,9 +4,6 @@
 /src/lib/tests/selfcheck/selfcheck
 /src/lib/tests/selfcheck/selfcheck-v*
 
-# Test fixtures (generated, not committed)
-/src/lib/tests/fixtures/
-
 node_modules
 
 # OS

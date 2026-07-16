@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-# Build test fixtures for milestone Bun versions.
+# Build test fixtures for milestone Bun versions and compile targets.
 #
-# Each fixture is a small extracted data section (~few KB) suitable for
-# checking into git and running fast unit tests against.
+# Each fixture is a small extracted payload (~few KB) that IS checked into git,
+# so `bun test` covers every metadata format (V1-V4) and both bunfs path roots
+# on any OS, with no Bun downloads and no platform-specific setup.
+#
+# Targets are cross-compiled, so a single host produces Linux and Windows
+# fixtures too — no Windows machine required. Bun < 1.1.26 predates `--target`
+# and is built natively instead.
+#
+# Note the fixtures are container-stripped (see extract-section.ts), so they
+# exercise format resolution and module walking, not section finding. Container
+# parsing is covered by the synthetic ELF/PE/Mach-O tests and by the e2e suite,
+# which builds real binaries.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -14,41 +24,63 @@ DUMMY_SRC="$DUMMY_DIR/index.ts"
 
 source "$SCRIPT_DIR/get-bun.sh"
 
-# Milestone versions representing each format revision
+# Milestone versions, one per metadata format revision:
+#   1.1.0  → V1 (32-byte chunks)      1.2.4  → V3 (36-byte chunks)
+#   1.1.26 → V2 (28-byte chunks)      1.3.9  → V4 (52-byte chunks)
 VERSIONS=("1.1.0" "1.1.26" "1.2.4" "1.3.9")
+
+# Cross-compile targets. windows-x64 matters beyond the container: its bundled
+# paths use the `B:/~BUN/root` bunfs root rather than `/$bunfs/root`.
+TARGETS=("bun-darwin-arm64" "bun-linux-x64" "bun-windows-x64")
 
 mkdir -p "$FIXTURES_DIR"
 
-for version in "${VERSIONS[@]}"; do
-  echo "=== Building fixture for Bun v${version} ==="
+build_fixture() {
+  local version="$1" target="$2" label="$3"
+  local outfile="/tmp/dummy-fixture-${version}-${label}"
+  local bun_bin
+  bun_bin=$(get_bun_path "$version")
 
-  BUN_BIN=$(get_bun_path "$version")
-  outname="dummy-fixture-${version}"
-  outfile="/tmp/${outname}"
-
-  # Compile the dummy binary using that Bun version
-  #   Older Bun versions may exit non-zero despite successful compilation
-  "$BUN_BIN" build --compile --sourcemap=inline \
-    "$DUMMY_SRC" --outfile "$outfile" || true
-
-  # Handle older Bun writing output next to source instead of --outfile path
-  if [ ! -f "$outfile" ] && [ -f "$DUMMY_DIR/$outname" ]; then
-    mv "$DUMMY_DIR/$outname" "$outfile"
+  if [ -n "$target" ]; then
+    "$bun_bin" build --compile --sourcemap=inline --target="$target" \
+      "$DUMMY_SRC" --outfile "$outfile" >/dev/null 2>&1 || true
+  else
+    "$bun_bin" build --compile --sourcemap=inline \
+      "$DUMMY_SRC" --outfile "$outfile" >/dev/null 2>&1 || true
   fi
 
-  if [ ! -f "$outfile" ]; then
-    echo "  FAIL: compilation failed for Bun v${version}"
-    exit 1
+  # Windows targets get an .exe suffix; older Bun writes next to the source
+  # instead of honouring --outfile.
+  [ -f "${outfile}.exe" ] && outfile="${outfile}.exe"
+  local stray="$DUMMY_DIR/$(basename "$outfile")"
+  [ ! -f "$outfile" ] && [ -f "$stray" ] && mv "$stray" "$outfile"
+
+  if [ ! -s "$outfile" ]; then
+    echo "  SKIP ${label}: compile failed (target unsupported on v${version}?)"
+    return 0
   fi
 
-  # Extract just the data section (using current Bun)
-  bun "$SCRIPT_DIR/extract-section.ts" "$outfile" -o "$FIXTURES_DIR/v${version}.bin"
-
-  # Cleanup the full binary
+  bun "$SCRIPT_DIR/extract-section.ts" "$outfile" \
+    -o "$FIXTURES_DIR/v${version}-${label}.bin" >/dev/null
+  echo "  ok   ${label} -> v${version}-${label}.bin"
   rm -f "$outfile"
+}
 
+for version in "${VERSIONS[@]}"; do
+  echo "=== Bun v${version} ==="
+
+  # Bun 1.1.0 has no --compile --target support; build for the host instead.
+  if [ "$version" = "1.1.0" ]; then
+    build_fixture "$version" "" "native"
+    echo ""
+    continue
+  fi
+
+  for target in "${TARGETS[@]}"; do
+    build_fixture "$version" "$target" "${target#bun-}"
+  done
   echo ""
 done
 
-echo "All fixtures built in $FIXTURES_DIR"
+echo "Fixtures in $FIXTURES_DIR:"
 ls -la "$FIXTURES_DIR"
