@@ -12,8 +12,7 @@ import {
   InvalidTrailerError,
   TotalByteCountMismatchError,
 } from "..";
-import { detectExecutableFormat } from "../formats";
-import { findMachoBunSection } from "../macho";
+import { detectExecutableFormat, locateBunSection } from "../formats";
 import { removeBunfsRootFromPath } from "../modules";
 
 let dummy: BunFile;
@@ -196,18 +195,23 @@ describe("container formats", () => {
     expect(detect([0xde, 0xad, 0xbe, 0xef])).toBe("unknown");
   });
 
+  // The dummy binary is compiled by the host's Bun, so its container varies by
+  // OS (Mach-O on macOS, ELF on Linux). Pull the payload out container-agnostically
+  // rather than assuming Mach-O, then re-wrap it to exercise each container's
+  // section finder on every OS.
+  function dummyPayload(): Uint8Array {
+    const { view } = locateBunSection(new DataView(dummyData));
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  }
+
   test("extracts through a synthetic ELF .bun section", () => {
-    const section = findMachoBunSection(new DataView(dummyData))!;
-    const payload = new Uint8Array(dummyData.slice(section.offset, section.offset + section.size));
-    const files = extractBundledFiles(wrapInElf(payload));
+    const files = extractBundledFiles(wrapInElf(dummyPayload()));
     expect(files[0].path).toBe("index.js");
     expect(files).toHaveLength(4);
   });
 
   test("extracts through a synthetic PE .bun section", () => {
-    const section = findMachoBunSection(new DataView(dummyData))!;
-    const payload = new Uint8Array(dummyData.slice(section.offset, section.offset + section.size));
-    const files = extractBundledFiles(wrapInPe(payload));
+    const files = extractBundledFiles(wrapInPe(dummyPayload()));
     expect(files[0].path).toBe("index.js");
     expect(files).toHaveLength(4);
   });

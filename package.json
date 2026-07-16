@@ -9,12 +9,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/andrewgross/bun-decompile.git"
+    "url": "git+https://github.com/andrewgross/bun-decompile-ag.git"
   },
   "bugs": {
-    "url": "https://github.com/andrewgross/bun-decompile/issues"
+    "url": "https://github.com/andrewgross/bun-decompile-ag/issues"
   },
-  "homepage": "https://github.com/andrewgross/bun-decompile#readme",
+  "homepage": "https://github.com/andrewgross/bun-decompile-ag#readme",
   "keywords": [
     "bun",
     "decompile",

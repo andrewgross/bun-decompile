@@ -49,6 +49,18 @@ npx bun-decompile-ag <binary>
 The CLI runs on Node 18+ and on Bun. You do **not** need Bun installed to
 extract a Bun binary.
 
+> **Not on npm yet** — publishing is blocked on the [license](#license). Until
+> then, build from source (installing from the repo with `bun add github:...`
+> silently yields a package with no code — `dist/` comes from a `prepare` script
+> that Bun blocks by default):
+>
+> ```sh
+> git clone https://github.com/andrewgross/bun-decompile-ag
+> cd bun-decompile-ag
+> bun install && bun run build
+> node dist/cli.js <binary>       # or: bun src/cli.ts <binary>
+> ```
+
 ## Usage
 
 ```sh
@@ -56,6 +68,22 @@ bun-decompile-ag <input-binary> [options]
 ```
 
 Installs also provide a shorter `bun-decompile` alias.
+
+```console
+$ bun-decompile-ag ./my-app -o ./extracted
+Bun v1.3.9 (cf6cdbbb)
+Extracted 4 file(s) to ./extracted
+
+$ ls ./extracted
+index.js  index.js.map  logo-47vhjydn.png  data-twdsv7gz.bin
+```
+
+The first line reports the Bun version the binary was built with. It is
+informational: if the version can't be read, the CLI warns and still extracts
+(see [A note on Bun 1.4.0](#a-note-on-bun-140)). The entrypoint is written as
+`index.js` unless `--no-normalize` is passed, and other bundled assets keep the
+hashed names Bun gave them. Any error is fatal and exits non-zero rather than
+writing partial output.
 
 ### Options
 

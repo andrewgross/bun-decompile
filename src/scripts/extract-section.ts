@@ -8,9 +8,9 @@
  * a legacy "appended" blob with no host-executable wrapper, so it can be fed
  * straight back into extractBundledFiles.
  *
- * NOTE: V3 (Bun 1.2.4 Mach-O, 24-byte Offsets) is not faithfully round-trippable
- * this way — without a section container it re-parses as V1/V2. Prefer the e2e
- * test for V3 coverage.
+ * Every format round-trips: a container-stripped V3 payload (Bun 1.2.4, 24-byte
+ * Offsets) is exactly what Bun itself emits for a 1.2.4 Linux/Windows target, so
+ * resolveModuleFormat identifies it from the metadata rather than the container.
  *
  * Usage:
  *   bun src/scripts/extract-section.ts <binary> -o <output.bin>
