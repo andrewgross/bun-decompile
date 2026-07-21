@@ -201,9 +201,12 @@ This fork adds:
 
 ## License
 
-Not currently licensed for redistribution. The upstream project publishes no
-license, so its copyright is reserved by default and this derivative work cannot
-grant terms over it. ("UNLICENSED" here is npm's marker for _no license
-granted_ — it is not [The Unlicense](https://unlicense.org).)
+Currently **UNLICENSED** — no redistribution rights are granted. This is a
+derivative of [lafkpages/bun-decompile](https://github.com/lafkpages/bun-decompile),
+which publishes no license, so upstream's copyright is reserved by default and
+this fork cannot grant terms over it. ("UNLICENSED" is npm's marker for _no
+license granted_ — it is not [The Unlicense](https://unlicense.org).)
 
-If you want to use this, open an issue.
+This is waiting on a licensing decision from upstream; if it becomes possible,
+this project would be released under the [MIT License](https://opensource.org/license/mit).
+Until then, if you'd like to use it, open an issue.
